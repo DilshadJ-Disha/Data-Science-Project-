@@ -1,0 +1,118 @@
+---
+title: "Project"
+author: "Dilshad Jahan"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Loading packages
+```{r}
+pacman::p_load(tidyverse, dplyr, here, spdep, knitr, sf, tmap)
+```
+
+We're analyzing the `Tesco Grocery 1.0` to write this project.
+
+```{r}
+# load data
+year_lsoa_data = read.csv(here("data/year_lsoa_grocery.csv")) %>% rename(lsoa_code = area_id)
+head(year_lsoa_data)
+```
+The following is for including a picture.
+
+```{r import figure, out.width="50%", fig.align='center',fig.cap="logo"}
+# include_graphics(here("figure/the-adilade-university-logo-1-1024x762.png"))
+```
+
+We'll be doing some EDA to gain insights. First things first, let's get ahead with the reseach question: why the discrepancy in the min(weight) and max(weight)? Are residents purchasing more bulky items in some areas? which areas? and who are purchasing them?
+
+```{r univariate analysis}
+# EDA
+plot1 <- ggplot(year_lsoa_data, aes(x = weight)) + 
+  geom_histogram(bins = 50, fill = "skyblue", color = "black") + ylab("pdf")
+ggsave("eda_uni.pdf", plot = plot1, width = 6, height = 4)
+```
+```{r}
+plot2 <- ggplot(year_lsoa_data, aes(x=weight, y=volume)) +geom_point() 
+ggsave("eda_bi.pdf", plot = plot2, width = 6, height = 4)
+cor(year_lsoa_data$weight,year_lsoa_data$volume, method = "pearson")
+```
+
+Obviously, the areas where the weight of the grocery is high, the volume is also high. What does that even mean for me? Or am I just saying stuff?
+
+Let's have age proportions, it worked for Canadian groceries. One is redundant
+```{r}
+year_lsoa_data$under17 <- year_lsoa_data$age_0_17/year_lsoa_data$population
+
+year_lsoa_data$plus65 <- year_lsoa_data$age_65./year_lsoa_data$population
+
+year_lsoa_data$weight_per_capita <- year_lsoa_data$weight/year_lsoa_data$population
+
+lm_combined <- lm(weight_per_capita ~ num_transactions + man_day + under17 + plus65 + people_per_sq_km + representativeness_norm, data=year_lsoa_data)
+summary(lm_combined)
+```
+Now let's check the assumptions.
+```{r}
+pdf("assump1.pdf", width = 6, height = 4)
+plot(lm_combined, which = 1)
+dev.off()
+
+pdf("assump2.pdf", width = 6, height = 4)
+plot(lm_combined, which = 2)
+dev.off()
+
+pdf("assump3.pdf", width = 6, height = 4)
+plot(lm_combined, which = 3)
+dev.off()
+
+```
+
+Then find the minimum and maximum value.
+
+```{r}
+min(year_lsoa_data$weight_per_capita)
+max(year_lsoa_data$weight_per_capita)
+```
+Now let's see who are the culprits.
+
+```{r}
+which.min(year_lsoa_data$weight_per_capita)
+```
+
+
+This only means the statistical modeling which requires the assumption of normality, we can do that.
+
+# Let's import our shapefile
+```{r}
+lsoas <- st_read("statistical-gis-boundaries-london/statistical-gis-boundaries-london/ESRI/LSOA_2011_London_gen_MHW.shp")%>%rename(lsoa_code = LSOA11CD, lsoa_name = LSOA11NM)
+```
+# Merge the two datasets
+I will use the `inner_join()` function from the `dplyr` package to join the two datasets together by a common variable. You can also use `left_join()` or `right_join()` , but by default, these create duplicate columns.
+
+```{r}
+tesco_and_lsoas <- inner_join(lsoas, year_lsoa_data)
+```
+Plotting
+```{r}
+# First, we add our base "shape" layer and then add the polygons layer
+plot6 <- tm_shape(tesco_and_lsoas)  + tm_polygons(fill = "weight_per_capita",lwd = 0.2, fill.chart = tm_chart_histogram(), fill.legend = tm_legend(title = "Weight per capita", reverse = TRUE), fill.scale = tm_scale(values = "orange")) + tm_title("Weight per capita of the groceries") + tm_compass() + tm_scalebar() +tm_layout(frame = FALSE) 
+tmap_save(plot6, filename = "map.pdf", width = 6, height = 4)
+```
+# Finding neighbours
+```{r}
+neighbours <- poly2nb(tesco_and_lsoas, queen = TRUE)
+neighbours
+```
+# weighting of the neighbours
+```{r}
+weights_matrix <- nb2listw(neighbours, style = "W")
+weights_matrix
+```
+
+# Calculating Moran's I
+```{r}
+moran.test(tesco_and_lsoas$weight_per_capita, listw = weights_matrix)
+```
+
