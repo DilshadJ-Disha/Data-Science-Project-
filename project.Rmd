@@ -3,7 +3,445 @@ title: "Project"
 author: "Dilshad Jahan"
 date: "`r Sys.Date()`"
 output: pdf_document
+------
+title: "Project"
+author: "Dilshad Jahan"
+date: "`r Sys.Date()`"
+output: pdf_document
 ---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Loading packages
+```{r, warning=FALSE}
+pacman::p_load(tidyverse, dplyr, here, spdep, knitr, sf, tmap, spatialreg, car, spgwr, GWmodel, ggplot2, lm.beta, ggthemes)
+```
+
+We're analyzing the `Tesco Grocery 1.0` to write this project. First, we load the data.
+
+```{r}
+# load data
+year_lsoa_data = read.csv(here("data/year_lsoa_grocery.csv")) %>% rename(lsoa_code = area_id)
+head(year_lsoa_data)
+```
+
+We'll be doing some EDA to gain insights. First things first, let's get ahead with the research question: Why is there a discrepancy between the weight consumption in certain areas? Are residents purchasing more bulky items in some areas? which areas? and who are purchasing them? and why? is that because they can't afford it?
+
+```{r univariate analysis}
+# EDA of the interested variable
+plot1 <- ggplot(year_lsoa_data, aes(x = weight)) + 
+  geom_histogram(bins = 50, fill = "skyblue", color = "black") + ylab("pdf")
+plot1
+#ggsave("eda_uni.pdf", plot = plot1, width = 6, height = 4)
+```
+Now the bivariate analysis
+```{r}
+#weight and volume are correlated
+plot2 <- ggplot(year_lsoa_data, aes(x=weight, y=volume)) +geom_point() 
+plot2
+#ggsave("eda_bi.pdf", plot = plot2, width = 6, height = 4)
+cor(year_lsoa_data$weight,year_lsoa_data$volume, method = "pearson")
+```
+
+Obviously, the areas where the weight of the grocery is high, the volume is also high.
+
+Now we fit a regression model with the explanatory variables that exist in the dataset.
+
+```{r}
+model1 <- lm(weight ~ num_transactions + man_day + people_per_sq_km + representativeness_norm, data=year_lsoa_data)
+summary(model1)
+```
+Now here's a few things. After much speculation, I found that `num_transactions` and `man_day` are almost perfectly collinear.
+```{r}
+plot10 <- ggplot(data = year_lsoa_data, mapping = aes(man_day, num_transactions)) +geom_point()
+ggsave("mn.pdf", plot = plot10, width = 8, height = 6)
+cor(year_lsoa_data$man_day, year_lsoa_data$num_transactions)
+```
+
+Now before checking the assumptions, we have to make sure that the variables that we're working with make sense in the model. We'll get rid of the variable `man_day` later on for handling collinearity in the model. 
+
+Next up, let's find the minimum and maximum value and this is where the fuss began.
+
+```{r}
+min(year_lsoa_data$weight)
+max(year_lsoa_data$weight)
+```
+Now let's see who are the culprits.
+
+```{r}
+which.min(year_lsoa_data$weight)
+which.max(year_lsoa_data$weight)
+```
+This only means the statistical modeling which requires the assumption of normality, we can do that.
+
+# Let's import our shapefile for creating CHOROPLETH MAPS
+```{r}
+lsoas <- st_read("statistical-gis-boundaries-london/statistical-gis-boundaries-london/ESRI/LSOA_2011_London_gen_MHW.shp")%>%rename(lsoa_code = LSOA11CD, lsoa_name = LSOA11NM)
+dim(lsoas)
+```
+# Merge the two datasets
+I will use the `inner_join()` function from the `dplyr` package to join the two datasets together by a common variable. You can also use `left_join()` or `right_join()` , but by default, these create duplicate columns.
+
+```{r}
+tesco_and_lsoas <- inner_join(lsoas, year_lsoa_data)
+```
+# Plotting the first choropleth map
+```{r}
+# First, we add our base "shape" layer and then add the polygons layer
+plot1 <- tm_shape(tesco_and_lsoas)  + tm_polygons(fill = "weight",lwd = 0.2, fill.chart = tm_chart_histogram(), fill.legend = tm_legend(title = "Weight", reverse = TRUE), fill.scale = tm_scale(values = "matplotlib.yl_or_rd")) + tm_title("Weight consumption in LSOA") + tm_compass() + tm_scalebar() +tm_layout(frame = FALSE) 
+plot1
+#tmap_save(plot1, filename = "map.pdf", width = 6, height = 4)
+```
+
+There's something that needs to be addressed here: the unit for the `weight` variable in play. Make sure to outline them in the project clearly so that people understand what kind of heavy or light weight you are talking about.
+
+
+Another important aspect of spatial analysis is calculating Moran's I. This statistical value gives us an idea about whether the spatial areas are autocorrelated or if the geographical areas are clustered. In simpler words, if the regions consuming more grocery weight are also heavily surrounded with people consuming similar weight of the groceries.
+
+# Finding neighbours
+```{r}
+neighbours <- poly2nb(tesco_and_lsoas, queen = TRUE)
+neighbours
+```
+# weighting of the neighbours
+```{r}
+weights_matrix <- nb2listw(neighbours, style = "W")
+weights_matrix
+```
+
+# Calculating Moran's I
+```{r}
+moran.test(tesco_and_lsoas$weight, listw = weights_matrix)
+```
+Maybe after noticing the map, it wasn't very obvious but the Moran's I value came as 0.7755, that's almost close to 1 indicating strong association in the spatial regions in grocery weight consumption.
+
+Now, I told that we worked with the existing explanatory variables so far. But since there are some more variable like `income` or `public transport accessibility rate` or `car ownership` that can have significant influence on how much a person consumes, so we integrate those variables in the model in this phase.
+
+# integrating public transport to the dataset
+```{r}
+trans_data <- read.csv(here("data/LSOA2011 AvPTAI2015.csv")) %>% rename(lsoa_code = LSOA2011) 
+#head(trans_data)
+```
+```{r}
+pub_trans_rate <- trans_data %>% select(lsoa_code, AvPTAI2015)
+trans_lsoa <- inner_join(tesco_and_lsoas, pub_trans_rate, by = "lsoa_code")
+#head(trans_lsoa)
+```
+Let's check if all the data values are incorporated well. 
+
+```{r}
+dim(tesco_and_lsoas)
+dim(trans_lsoa)
+```
+It seems like they are joined perfectly this time. At least the rows are equal here. According to this, the `trans_lsoa` dataset has exactly one extra column. But, a new problem occurs, while viewing the datasets, the columns get all arbitrary and doesn't make any sense. 
+
+Oops, they were by the end, I forgot to check there. Now, just out of curiosity, I could validate the public transport accessibilty with a map.
+
+```{r}
+plot2 <- tm_shape(trans_lsoa) +
+  tm_polygons(
+    fill = "AvPTAI2015",
+    fill.scale = tm_scale_intervals(
+      values = "matplotlib.gn_bu",      
+      n = 7,                   
+      style = "quantile"      
+    ),
+    fill.legend = tm_legend(title = "PTAI Score")
+  ) +
+  tm_borders(lwd = 0.1, col = "black") +
+  tm_title("Public Transport Accessibility Score") +
+  tm_compass(type = "arrow", position = c("right", "top"), size = 2) +
+  tm_scalebar(position = c("left", "bottom")) +
+  tm_layout(frame = FALSE)
+plot2
+#tmap_save(plot2, filename = "PTAL.pdf", width = 8, height = 6, dpi = 300)
+```
+
+The real photo contains detailed outline of the transport system, but this one vaguely captures the picture. Now that we have public transport accesibility level in our dataset, we need the number of car ownership  and the median income of the household in the area to cover for economic access. Let's look at the LSOA data for that.
+
+```{r}
+lsoa_data = read.csv(here("data/lsoa-data.csv"), header = FALSE, comment.char = "#")
+lsoa_car <- lsoa_data %>% select(V1,V233,V257)
+head(lsoa_car)
+```
+
+
+# Data Cleaning
+We make way for a cleaner dataset by getting rid of the redundant variables.
+```{r}
+cleaned <- trans_lsoa[, -c(23:202)]
+dim(cleaned)
+```
+
+I can see that there are extra 5 rows in lsoa_car. I know there are two empty rows and one contains the name of the variable. But theyall go away once I join them with the cleaned dataset.
+
+```{r}
+names(lsoa_car) <- as.character(unlist(lsoa_car[1, ]))
+lsoa_car <- lsoa_car[-1, ]
+colnames(lsoa_car)<-c("lsoa_code","percno_car","med_inc")
+head(lsoa_car)
+```
+
+```{r}
+joined <- inner_join(cleaned, lsoa_car)
+#head(joined)
+dim(joined)
+```
+Now to verify if actually the extra rows have been removed. And the dataset looks much cleaner and it's easy to navigate now.
+```{r}
+dim(joined)
+View(joined)
+```
+
+let's just get on with the regression once again. But before that, we will change some variable type as they are supposed to be numeric but are assigned as characters in the dataset.
+
+```{r}
+joined$percno_car <- as.numeric(joined$percno_car)
+joined$med_inc <- as.numeric(joined$med_inc)
+```
+We can also verify the strip present in all the other choropleth maps.
+```{r}
+plot13 <- tm_shape(joined)  + tm_polygons(fill = "med_inc",lwd = 0.2, fill.chart = tm_chart_histogram(), fill.legend = tm_legend(title = "Median income", reverse = TRUE), fill.scale = tm_scale(values = "matplotlib.blues")) + tm_title("Median income in LSOA") + tm_compass() + tm_scalebar() +tm_layout(frame = FALSE) 
+plot13
+#tmap_save(plot13, filename = "income.pdf", width = 8, height = 6, dpi = 300)
+```
+Now the regression.
+
+```{r}
+model2 <- lm(weight ~ num_transactions + man_day + people_per_sq_km +  AvPTAI2015 + percno_car + med_inc, data=joined)
+summary(model2)
+```
+And we can do a similar thing with car ownership to understand which area has got lesser or no cars.
+```{r}
+plot5 <- tm_shape(joined) +
+  tm_polygons(
+    fill = "percno_car",
+    fill.scale = tm_scale_intervals(
+      values = "Blues",      
+      n = 7,                   
+      style = "quantile"      
+    ),
+    fill.legend = tm_legend(title = "No Car Ownership")
+  ) +
+  tm_borders(lwd = 0.1, col = "black") +
+  tm_title("% of people with no cars") +
+  tm_compass(type = "arrow", position = c("right", "top"), size = 2) +
+  tm_scalebar(position = c("left", "bottom")) +
+  tm_layout(frame = FALSE)
+plot5
+#tmap_save(plot5, filename = "car.pdf", width = 8, height = 6, dpi = 300)
+```
+Now, with only the PTAL and car ownership predictor.
+
+```{r}
+model3 <- lm(weight ~ AvPTAI2015 + percno_car, data = joined)
+summary(model3)
+```
+No wonder there, both of them are significant and while one is negatively significant and another is positive. In summary, better public transport, small grocery weight, and less car, more grocery weight.
+
+Now, remember we wanted to get rid of either `num_transactions` or `man_day`? We'll make that decision based on two things. One, which explains the model better and two, does not compromise the value of R squared in  the model.
+
+```{r}
+model4 <- lm(weight ~  num_transactions , data = joined)
+summary(model4)
+```
+# Checking for collinearity in income and car ownership
+```{r}
+plot3 <- ggplot(data = joined, mapping = aes(percno_car,med_inc)) + geom_point()
+plot3
+#ggsave("car_vs_inc.pdf", plot = plot3, width = 8, height = 6)
+
+ggplot(data = joined, mapping = aes(man_day, num_transactions)) + geom_point()
+ggplot(data = joined, mapping = aes(weight, med_inc)) + geom_point()
+ggplot(data = joined, mapping = aes(weight, log(med_inc))) + geom_point()
+```
+I found a few of the variables collinear that are present in the model. Although getting an approximate 30% explanability is not too bad, but we can't really have variable which has a VIF of more than 10. That's just pure worst model. In the graph above, it shows that income and people owning no car in an area is although non-linear but negative, which makes sense. In an area, as median income goes up, the pecentage of people now owning cars decline. We'll take logarithm of median income so that it does not appear multicollinear again. Also, the age variable is messing up the significance of PTAL, so we'll get rid of that too.
+
+So te final model is this.
+
+```{r}
+model5 <- lm(weight ~ num_transactions + AvPTAI2015 + percno_car + AVHHOLDSZ + people_per_sq_km + log(med_inc), data = joined)
+summary(model5)
+```
+Finding the RSS value to later on compare with other model
+```{r}
+rss <- sum(residuals(model5)^2)
+rss
+```
+And, we can check the assumptions in the following way.
+
+```{r}
+pdf("assump1.pdf", width = 6, height = 4)
+plot(model5, which = 1)
+#dev.off()
+
+pdf("assump2.pdf", width = 6, height = 4)
+plot(model5, which = 2)
+#dev.off()
+
+pdf("assump3.pdf", width = 6, height = 4)
+plot(model5, which = 3)
+#dev.off()
+```
+Now, we'll try Moran's I on the residual of the model.
+```{r}
+moran.test(residuals(model5), listw = weights_matrix)
+```
+
+As suspected, the spatial clustering did not improve much. We might have to try a different model altogether since the independence of residuals assumption is not met in OLS.
+But before that, let's check the condition of multicollinearity in the model.
+
+```{r}
+vif(model5)
+```
+All of them look normal, at least they are under 5, so nothing much concerning. I mean the correlation between `percno_car` and `AvPTAI2015` is still moderately strong, still the model seems stable.
+
+```{r}
+plot4 <- ggplot(data = joined, mapping = aes(percno_car, AvPTAI2015)) + geom_point()
+plot4
+#ggsave("carVSpubtrans.pdf", plot = plot4, width = 8, height = 6)
+cor(joined$percno_car, joined$AvPTAI2015)
+```
+
+We can also produce a graph that contains the most important  predictor variables in our final model.
+```{r}
+# Compute standardized coefficients
+model5_std <- lm.beta(model5)
+
+# Extract coefficients and their names
+coef_data <- data.frame(
+  Variable = names(model5_std$standardized.coefficients)[-1],  # exclude intercept
+  Std_Coefficient = model5_std$standardized.coefficients[-1]
+)
+
+# Create coefficient importance plot
+plot11 <- ggplot(coef_data, aes(x = reorder(Variable, Std_Coefficient), 
+                      y = Std_Coefficient, 
+                      fill = Std_Coefficient > 0)) +
+  geom_bar(stat = "identity", width = 0.7, color = "black") +
+  coord_flip() +
+  scale_fill_manual(values = c("TRUE" = "steelblue", "FALSE" = "tomato")) +
+  labs(
+    title = "Standardized Coefficients of Predictors",
+    x = "Predictor Variable",
+    y = "Standardized Effect on Grocery Consumption"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+plot11
+#ggsave("importance.pdf", plot = plot11, width = 8, height = 6)
+```
+
+When Moran's I is significant and one global coefficient doesn't work, we opt for GWR (geographically weighted regression). 
+
+```{r}
+# Assume `data` is your sf object with geometry and the variables:
+#   y = your dependent variable  
+#   x1, x2, x3 = your predictors
+
+# joined must contain the variables used in the formula
+data.sp <- as(joined, "Spatial")
+coords <- coordinates(data.sp)
+dim(coords)
+data_df <- data.sp@data            # plain data.frame
+
+# remove rows with NA in model variables (important!)
+vars <- c("weight","num_transactions","AvPTAI2015","percno_car","AVHHOLDSZ","people_per_sq_km","med_inc")
+keep <- complete.cases(data_df[, vars]) & data_df$med_inc > 0
+data_df2 <- data_df[keep, ]
+coords2   <- coords[keep, ]
+```
+The coords is supposed to be an Nx2 matrix. This checks out.Now, according to the book and from 'GWmodel' package:
+
+```{r}
+# finding optimal bandwidth (uses Gaussian)
+# coords is relevant here
+gwr.b1 <- gwr.sel(weight ~ num_transactions + AvPTAI2015 + percno_car + AVHHOLDSZ + people_per_sq_km + log(med_inc), data = data.sp)
+gwr.b1
+```
+**Imp: Do not use `summary()` for the GWR model**
+
+The lowest bandwidth will be accepted. In this case, we will find the optimum bandwidth to fit in the model.It's 1645.975.
+
+```{r, warning=FALSE}
+# Step 2: Fit GWR, takes 2/3 hours?
+gwr.fit1<-gwr(weight ~ num_transactions + AvPTAI2015 + percno_car + AVHHOLDSZ + people_per_sq_km + log(med_inc), data = data.sp, bandwidth = gwr.b1, se.fit=T, hatmatrix=T)
+gwr.fit1
+```
+
+Or we could find the bandwidth using bisquare or adaptive techniques.For now, let's stick with the Fixed one.
+
+I got an output. Let's compare the AIC values of OLS and GWR.
+
+```{r}
+AIC(model5)
+```
+We can definitely say that GWR is an improvement over OLS. The $R^2$ value and AIC value both indicate that GWR is a better fit for a model than OLS.
+
+# creating plot for visualization
+
+```{r}
+
+globalR2 <- (1-(gwr.fit1$results$rss/gwr.fit1$gTSS))
+sp <- gwr.fit1$SDF
+sf <- st_as_sf(sp)
+
+plot12 <- ggplot() + geom_sf(data = sf, aes(fill=localR2)) + coord_sf() + scale_fill_viridis_c(option = "plasma") + theme_map() + ggtitle(paste("Local R2")) + labs(subtitle = paste("Global R2:", round(globalR2, 2)))
+plot12
+#ggsave(filename = "GlobalR2.pdf", plot12, width = 8, height = 6)
+```
+This is the plot containing the $R^2$ values. Now to produce and save the plots of local coefficients, we use the following:
+```{r}
+# Convert GWR output (Spatial* object) to sf
+sf <- st_as_sf(gwr.fit1$SDF)
+# List of coefficient columns to map
+coef_vars <- c(
+  "num_transactions",
+  "AvPTAI2015",
+  "percno_car",
+  "AVHHOLDSZ",
+  "people_per_sq_km",
+  "log.med_inc."
+)
+
+# Create maps directory (optional)
+if (!dir.exists("gwr_maps")) dir.create("gwr_maps")
+
+# Loop: generate 1 map per coefficient
+for (v in coef_vars) {
+  
+  p <- ggplot() +
+    geom_sf(data = sf, aes(fill = .data[[v]]), color = NA) +
+    scale_fill_viridis_c(option = "plasma") +
+    theme_map() +
+    ggtitle(paste("Local Coefficient for:", v)) +
+    labs(subtitle = "Geographically Weighted Regression (GWR)")
+  
+  print(p)
+  
+  # Save PDF
+  p
+  #ggsave(filename = paste0("gwr_maps/gwr_coef_", v, ".pdf"), plot = p,width = 8, height = 6)
+}
+```
+We can also find out the Moran's I for GWR residuals. The value of Moran's I for OLS residuals was 0.5775, which is pretty decent. Let's check if it decreases after using GWR as a model.
+
+```{r}
+# Extract fitted values
+fitted_vals <- gwr.fit1$SDF$pred
+
+# Observed values
+observed_vals <- joined$weight
+
+# Residuals
+resid_raw <- observed_vals - fitted_vals
+```
+
+```{r}
+joined$residuals_gwr <- resid_raw
+moran.test(joined$residuals_gwr, weights_matrix)
+```
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -115,4 +553,5 @@ weights_matrix
 ```{r}
 moran.test(tesco_and_lsoas$weight_per_capita, listw = weights_matrix)
 ```
+
 
